@@ -40,6 +40,13 @@ INCLUDE_PATTERN=""
 EXCLUDE_PATTERN=""
 VERBOSE_MODE="false"
 
+# URL generation variables (for production use)
+URL_MODE=""
+WSL=""
+PROTO=""
+HOST_ADDR=""
+HOST_PORT=""
+
 # Color scheme for output
 RED=$'\033[0;31m'
 GREEN=$'\033[0;32m'
@@ -158,6 +165,11 @@ ${GREEN}OPTIONS:${NC}
     ${YELLOW}-r, --recursive${NC}         Recursively scan directories
     ${YELLOW}--include-pattern${NC} PAT   Include files matching pattern
     ${YELLOW}--exclude-pattern${NC} PAT   Exclude files matching pattern
+    ${YELLOW}--url-mode${NC} MODE         URL generation mode: file, local, remote
+    ${YELLOW}--wsl${NC} NAME              WSL distribution name (for file:// URLs)
+    ${YELLOW}--proto${NC} PROTOCOL        Protocol override (http://, https://, file://)
+    ${YELLOW}--host-addr${NC} ADDR        Host address for local/remote URLs
+    ${YELLOW}--host-port${NC} PORT        Host port for local/remote URLs
 
 ${GREEN}EXAMPLES:${NC}
     # Basic usage with images directory
@@ -316,6 +328,26 @@ parse_args() {
                 EXCLUDE_PATTERN="$2"
                 shift 2
                 ;;
+            --url-mode)
+                URL_MODE="$2"
+                shift 2
+                ;;
+            --wsl)
+                WSL="$2"
+                shift 2
+                ;;
+            --proto)
+                PROTO="$2"
+                shift 2
+                ;;
+            --host-addr)
+                HOST_ADDR="$2"
+                shift 2
+                ;;
+            --host-port)
+                HOST_PORT="$2"
+                shift 2
+                ;;
             -*)
                 log_error "Unknown option: $1"
                 show_help
@@ -328,13 +360,21 @@ parse_args() {
                 elif [[ "$1" == ".." ]]; then
                     MEDIA_SOURCES+=("$(cd .. && pwd)")
                 elif [[ "$1" =~ ^\.\./ ]]; then
-			MEDIA_SOURCES+=("$(cd "$(dirname "$1")")/$(basename "$1")")
+                    # Handle relative paths starting with ../
+                    local resolved_path=$(cd "$(dirname "$1")" 2>/dev/null && pwd)
+                    if [[ -n "$resolved_path" ]]; then
+                        MEDIA_SOURCES+=("$resolved_path/$(basename "$1")")
+                    else
+                        MEDIA_SOURCES+=("$1")
+                    fi
                 elif [[ "$1" =~ ^\./ ]]; then
-			MEDIA_SOURCES+=("$(pwd)/${1#./}")
+                    MEDIA_SOURCES+=("$(pwd)/${1#./}")
                 elif [[ "$1" =~ ^[^/] ]]; then
-			MEDIA_SOURCES+=("$(pwd)/$1")
+                    # Relative path without ./ prefix
+                    MEDIA_SOURCES+=("$(pwd)/$1")
                 else
-			MEDIA_SOURCES+=("$1")
+                    # Absolute path
+                    MEDIA_SOURCES+=("$1")
                 fi
                 shift
                 ;;
@@ -1834,6 +1874,22 @@ write_html_template() {
                         <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
                     </svg>
                 </button>
+                <!-- Shuffle button for viewer -->
+                <button class="icon-btn" id="viewerShuffleBtn" title="Shuffle">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="16 3 21 3 21 8"></polyline>
+                        <line x1="4" y1="20" x2="21" y2="3"></line>
+                        <polyline points="21 16 21 21 16 21"></polyline>
+                        <line x1="15" y1="15" x2="21" y2="21"></line>
+                        <line x1="4" y1="4" x2="9" y2="9"></line>
+                    </svg>
+                </button>
+                <!-- Play/Pause button for viewer -->
+                <button class="icon-btn" id="viewerPlayPauseBtn" title="Play/Pause">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M8 5v14l11-7z"></path>
+                    </svg>
+                </button>
                 <button class="icon-btn" id="closeViewer" title="Close">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="18" y1="6" x2="6" y2="18"></line>
@@ -2030,6 +2086,85 @@ write_html_template() {
         let loadedBytesFromCache = 0;
         let cacheSpeedInCurrent = 0;
         let cacheSpeedOutCurrent = 0;
+
+        /**
+         * Persist the current configuration and state-related settings to localStorage.
+         * The saved object contains only user-modifiable options and excludes any
+         * transient state (like currentIndex or shuffle status). Saving occurs when
+         * the user changes a setting such as theme, layout, cache, or toggles.
+         */
+        function saveSettings() {
+            try {
+                const settings = {
+                    enableCache: state.cacheEnabled,
+                    enableAITheme: config.enableAITheme,
+                    enableEXIF: config.enableEXIF,
+                    enableFaceDetection: config.enableFaceDetection,
+                    enableLazyLoading: config.enableLazyLoading,
+                    enableKeyboardShortcuts: config.enableKeyboardShortcuts,
+                    enableTouchGestures: config.enableTouchGestures,
+                    enableFullscreenAPI: config.enableFullscreenAPI,
+                    enableShareAPI: config.enableShareAPI,
+                    enableClipboardAPI: config.enableClipboardAPI,
+                    enableVibrationAPI: config.enableVibrationAPI,
+                    enable3DTransforms: config.enable3DTransforms,
+                    enableMusicVisualizer: config.enableMusicVisualizer,
+                    enableParticleEffects: config.enableParticleEffects,
+                    theme: state.currentTheme || config.theme,
+                    layout: state.currentLayout || config.layout,
+                    thumbnailSize: config.thumbnailSize,
+                    slideshowSpeed: config.slideshowSpeed
+                };
+                localStorage.setItem('mediaVaultSettings', JSON.stringify(settings));
+            } catch (err) {
+                console.error('Failed to save settings', err);
+            }
+        }
+
+        /**
+         * Load saved configuration from localStorage and apply to the current config
+         * and state objects. If no saved settings exist, this function is a no-op.
+         */
+        function loadSettings() {
+            try {
+                const saved = JSON.parse(localStorage.getItem('mediaVaultSettings') || '{}');
+                if (!saved || typeof saved !== 'object') return;
+                // Merge saved values into config where appropriate
+                if (typeof saved.enableCache !== 'undefined') {
+                    config.enableCache = saved.enableCache;
+                    state.cacheEnabled = saved.enableCache;
+                }
+                if (typeof saved.enableAITheme !== 'undefined') config.enableAITheme = saved.enableAITheme;
+                if (typeof saved.enableEXIF !== 'undefined') config.enableEXIF = saved.enableEXIF;
+                if (typeof saved.enableFaceDetection !== 'undefined') config.enableFaceDetection = saved.enableFaceDetection;
+                if (typeof saved.enableLazyLoading !== 'undefined') config.enableLazyLoading = saved.enableLazyLoading;
+                if (typeof saved.enableKeyboardShortcuts !== 'undefined') config.enableKeyboardShortcuts = saved.enableKeyboardShortcuts;
+                if (typeof saved.enableTouchGestures !== 'undefined') config.enableTouchGestures = saved.enableTouchGestures;
+                if (typeof saved.enableFullscreenAPI !== 'undefined') config.enableFullscreenAPI = saved.enableFullscreenAPI;
+                if (typeof saved.enableShareAPI !== 'undefined') config.enableShareAPI = saved.enableShareAPI;
+                if (typeof saved.enableClipboardAPI !== 'undefined') config.enableClipboardAPI = saved.enableClipboardAPI;
+                if (typeof saved.enableVibrationAPI !== 'undefined') config.enableVibrationAPI = saved.enableVibrationAPI;
+                if (typeof saved.enable3DTransforms !== 'undefined') config.enable3DTransforms = saved.enable3DTransforms;
+                if (typeof saved.enableMusicVisualizer !== 'undefined') config.enableMusicVisualizer = saved.enableMusicVisualizer;
+                if (typeof saved.enableParticleEffects !== 'undefined') config.enableParticleEffects = saved.enableParticleEffects;
+                if (typeof saved.theme === 'string') {
+                    config.theme = saved.theme;
+                    state.currentTheme = saved.theme;
+                }
+                if (typeof saved.layout === 'string') {
+                    config.layout = saved.layout;
+                    state.currentLayout = saved.layout;
+                }
+                if (typeof saved.thumbnailSize === 'number') {
+                    config.thumbnailSize = saved.thumbnailSize;
+                }
+                if (typeof saved.slideshowSpeed === 'number') {
+                    config.slideshowSpeed = saved.slideshowSpeed;
+                }
+            } catch (err) {
+                console.error('Failed to load settings', err);
+            }
+        }
 
         /**
          * Compute total size of all media items in the gallery. Must be called whenever
@@ -2404,6 +2539,9 @@ write_html_template() {
 
         // Initialize the app
         async function init() {
+            // Load any saved settings before applying defaults
+            loadSettings();
+
             // Set page title
             document.title = config.title;
 
@@ -2469,7 +2607,52 @@ write_html_template() {
             const cacheToggle = document.getElementById('cacheToggle');
             if (state.cacheEnabled) {
                 cacheToggle.classList.add('active');
+            } else {
+                cacheToggle.classList.remove('active');
             }
+
+            // Apply saved UI preferences (theme, layout, toggles, thumbnail size, speed)
+            // Theme
+            document.body.className = \`theme-\${config.theme}\`;
+            const themeSelectEl = document.getElementById('themeSelect');
+            if (themeSelectEl) {
+                themeSelectEl.value = config.theme;
+            }
+            // Layout buttons
+            document.querySelectorAll('[data-layout]').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.layout === state.currentLayout);
+            });
+            // Toggle switches mapping
+            const toggleMapping = {
+                aiThemeToggle: config.enableAITheme,
+                lazyLoadToggle: config.enableLazyLoading,
+                keyboardToggle: config.enableKeyboardShortcuts,
+                touchToggle: config.enableTouchGestures,
+                particlesToggle: config.enableParticleEffects,
+                visualizerToggle: config.enableMusicVisualizer
+            };
+            Object.keys(toggleMapping).forEach(id => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.classList.toggle('active', !!toggleMapping[id]);
+                }
+            });
+            // Thumbnail size
+            const thumbInput = document.getElementById('thumbSizeInput');
+            if (thumbInput) {
+                thumbInput.value = config.thumbnailSize;
+                const thumbDisplay = document.getElementById('thumbSizeDisplay');
+                if (thumbDisplay) thumbDisplay.textContent = \`\${config.thumbnailSize}px\`;
+                document.documentElement.style.setProperty('--thumb-size', \`\${config.thumbnailSize}px\`);
+            }
+            // Slideshow speed display
+            const speedDisp = document.getElementById('speedDisplay');
+            if (speedDisp) {
+                speedDisp.textContent = \`\${config.slideshowSpeed / 1000}s\`;
+            }
+
+            // Save the loaded settings back to storage to ensure defaults are persisted
+            saveSettings();
             // Periodic update for caching and loading speeds
             setInterval(() => {
                 const inEl = document.getElementById('cacheSpeedIn');
@@ -2531,6 +2714,7 @@ write_html_template() {
                     chip.classList.add('active');
                     state.currentSort = chip.dataset.sort;
                     renderGallery();
+                    saveSettings();
                 });
             });
 
@@ -2540,7 +2724,9 @@ write_html_template() {
                     document.querySelectorAll('[data-layout]').forEach(b => b.classList.remove('active'));
                     btn.classList.add('active');
                     state.currentLayout = btn.dataset.layout;
+                    config.layout = state.currentLayout;
                     renderGallery();
+                    saveSettings();
                 });
             });
 
@@ -2553,15 +2739,13 @@ write_html_template() {
             // Cache toggle
             document.getElementById('cacheToggle').addEventListener('click', () => {
                 state.cacheEnabled = !state.cacheEnabled;
-                const toggleEl = document.getElementById('cacheToggle');
+                config.enableCache = state.cacheEnabled;
+                document.getElementById('cacheToggle').classList.toggle('active', state.cacheEnabled);
+                // Persist cache preference in our settings object
+                saveSettings();
                 if (state.cacheEnabled) {
-                    toggleEl.classList.add('active');
-                    localStorage.setItem('cacheEnabled', true);
                     // When enabling cache at runtime, cache all currently loaded media
                     cacheAllMedia();
-                } else {
-                    toggleEl.classList.remove('active');
-                    localStorage.setItem('cacheEnabled', false);
                 }
                 updateCacheProgress();
             });
@@ -2583,21 +2767,39 @@ write_html_template() {
             document.getElementById('downloadBtn').addEventListener('click', downloadCurrentMedia);
             document.getElementById('shareBtn').addEventListener('click', shareCurrentMedia);
 
+            // Additional viewer controls (play/pause and shuffle) inside fullscreen viewer
+            const viewerPlayButton = document.getElementById('viewerPlayPauseBtn');
+            if (viewerPlayButton) {
+                viewerPlayButton.addEventListener('click', toggleSlideshow);
+            }
+            const viewerShuffleButton = document.getElementById('viewerShuffleBtn');
+            if (viewerShuffleButton) {
+                viewerShuffleButton.addEventListener('click', () => {
+                    shuffleGallery();
+                });
+            }
+
             // Settings controls
             document.getElementById('themeSelect').addEventListener('change', (e) => {
                 applyTheme(e.target.value);
+                // Update config and persist theme
+                config.theme = e.target.value;
+                saveSettings();
             });
 
             document.getElementById('thumbSizeInput').addEventListener('input', (e) => {
                 const size = e.target.value;
                 document.getElementById('thumbSizeDisplay').textContent = \`\${size}px\`;
                 document.documentElement.style.setProperty('--thumb-size', \`\${size}px\`);
+                config.thumbnailSize = parseInt(size);
+                saveSettings();
             });
 
             // Toggle switches in settings
             document.getElementById('aiThemeToggle').addEventListener('click', function() {
                 this.classList.toggle('active');
                 config.enableAITheme = this.classList.contains('active');
+                saveSettings();
             });
 
             document.getElementById('lazyLoadToggle').addEventListener('click', function() {
@@ -2606,16 +2808,19 @@ write_html_template() {
                 if (config.enableLazyLoading) {
                     setupLazyLoading();
                 }
+                saveSettings();
             });
 
             document.getElementById('keyboardToggle').addEventListener('click', function() {
                 this.classList.toggle('active');
                 config.enableKeyboardShortcuts = this.classList.contains('active');
+                saveSettings();
             });
 
             document.getElementById('touchToggle').addEventListener('click', function() {
                 this.classList.toggle('active');
                 config.enableTouchGestures = this.classList.contains('active');
+                saveSettings();
             });
 
             document.getElementById('particlesToggle').addEventListener('click', function() {
@@ -2626,11 +2831,13 @@ write_html_template() {
                 } else {
                     stopParticles();
                 }
+                saveSettings();
             });
 
             document.getElementById('visualizerToggle').addEventListener('click', function() {
                 this.classList.toggle('active');
                 config.enableMusicVisualizer = this.classList.contains('active');
+                saveSettings();
             });
 
             // Modal backdrop click
@@ -2846,14 +3053,26 @@ write_html_template() {
         function toggleSlideshow() {
             state.isPlaying = !state.isPlaying;
             const btn = document.getElementById('playPauseBtn');
+            const viewerBtn = document.getElementById('viewerPlayPauseBtn');
             
             if (state.isPlaying) {
-                btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>';
+                // Set pause icons for both control panel and viewer buttons
+                const pauseIconSmall = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>';
+                const pauseIconLarge = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>';
+                if (btn) btn.innerHTML = pauseIconSmall;
+                if (viewerBtn) viewerBtn.innerHTML = pauseIconLarge;
                 startSlideshow();
             } else {
-                btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"></path></svg>';
+                // Set play icons for both buttons
+                const playIconSmall = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"></path></svg>';
+                const playIconLarge = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"></path></svg>';
+                if (btn) btn.innerHTML = playIconSmall;
+                if (viewerBtn) viewerBtn.innerHTML = playIconLarge;
                 stopSlideshow();
             }
+            
+            // Persist updated slideshow state and speed
+            saveSettings();
         }
 
         function startSlideshow() {
@@ -2877,34 +3096,56 @@ write_html_template() {
 
         function adjustSpeed(delta) {
             config.slideshowSpeed = Math.max(1000, Math.min(10000, config.slideshowSpeed + delta));
-            document.getElementById('speedDisplay').textContent = \`\${config.slideshowSpeed / 1000}s\`;
+            const speedDisplayEl = document.getElementById('speedDisplay');
+            if (speedDisplayEl) speedDisplayEl.textContent = \`\${config.slideshowSpeed / 1000}s\`;
             
             if (state.isPlaying) {
                 stopSlideshow();
                 startSlideshow();
             }
+            
+            // Persist new speed
+            saveSettings();
         }
 
         function shuffleGallery() {
-	    state.previousSort = state.currentSort;
-	    state.currentSort = 'shuffled';
-
-            // Fisher-Yates shuffle
+            // Fisher-Yates shuffle to randomize the current media order
             const shuffled = [...mediaData];
             for (let i = shuffled.length - 1; i > 0; i--) {
                 const j = Math.floor(Math.random() * (i + 1));
                 [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
             }
             
-            // Update media data and re-render
+            // Replace the mediaData array with the shuffled ordering
             mediaData.length = 0;
             mediaData.push(...shuffled);
+            
+            // Mark state as shuffled and clear any active sort buttons
+            state.currentSort = 'shuffled';
+            document.querySelectorAll('[data-sort]').forEach(c => c.classList.remove('active'));
+            
+            // Reset the current index to the start of the shuffled order
+            state.currentIndex = 0;
+            
+            // Re-render the gallery to reflect the new order
             renderGallery();
             
-            // Vibrate if enabled
+            // If the viewer is open, load the first media item in the new order
+            if (document.querySelector('.fullscreen-viewer.active')) {
+                const first = mediaData[0];
+                if (first) {
+                    loadViewerMedia(first);
+                    window.location.hash = encodeURIComponent(first.url);
+                }
+            }
+            
+            // Vibrate if the API is enabled
             if (config.enableVibrationAPI && navigator.vibrate) {
                 navigator.vibrate(50);
             }
+            
+            // Persist shuffle state by saving settings (although shuffle order itself is transient)
+            saveSettings();
             
             showToast('Gallery shuffled!', 'info');
         }
@@ -3203,9 +3444,13 @@ write_html_template() {
 
         function applyTheme(theme) {
             state.currentTheme = theme;
+            // Persist theme into config
+            config.theme = theme;
             document.body.className = \`theme-\${theme}\`;
             document.getElementById('themeSelect').value = theme;
             showToast(\`Theme changed to \${theme}\`, 'info');
+            // Persist the new theme selection
+            saveSettings();
         }
 
         async function applyMediaTheme(url) {
@@ -3443,18 +3688,20 @@ write_html_template() {
         }
 
         function cycleLayout() {
-            const layouts = ['masonry', 'grid', 'carousel', 'timeline', 'scatter', 'spiral'];
-            const currentIndex = layouts.indexOf(state.currentLayout);
-            const nextIndex = (currentIndex + 1) % layouts.length;
-            state.currentLayout = layouts[nextIndex];
-            
-            // Update UI
-            document.querySelectorAll('[data-layout]').forEach(btn => {
-                btn.classList.toggle('active', btn.dataset.layout === state.currentLayout);
+        const layouts = ['masonry', 'grid', 'carousel', 'timeline', 'scatter', 'spiral'];
+        const currentIndex = layouts.indexOf(state.currentLayout);
+        const nextIndex = (currentIndex + 1) % layouts.length;
+        state.currentLayout = layouts[nextIndex];
+            config.layout = state.currentLayout;
+
+        // Update UI
+        document.querySelectorAll('[data-layout]').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.layout === state.currentLayout);
             });
-            
-            renderGallery();
+
+        renderGallery();
             showToast(\`Layout changed to \${state.currentLayout}\`, 'info');
+            saveSettings();
         }
 
         // Touch gestures
